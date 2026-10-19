@@ -14,6 +14,6 @@ ENV npm_config_store_dir=/pnpm/store
 COPY package.json ./
 
 RUN --mount=type=cache,target=/pnpm/store,sharing=locked \
-  pnpm install --no-frozen-lockfile --store-dir/pnpm/store \
+  pnpm install --no-frozen-lockfile --store-dir=/pnpm/store \
   && test "$(ls node_modules/.pnpm | wc -l)" -gt 50 \
   && echo "heavy pnpm install OK: $(ls node_modules/.pnpm | wc -l) packages"
