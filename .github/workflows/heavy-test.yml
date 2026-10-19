@@ -41,7 +41,7 @@ jobs:
       - name: inject cache into docker
         uses: ./
         with:
-          skip-extraction: ${{ steps.cache.outputs.cache-hit == 'true' }}
+          skip-extraction: false
           cache-map: |
             {
               "pnpm-store": {
