@@ -1,0 +1,54 @@
+---
+name: Heavy pnpm install Test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PNPM_HOME: /pnpm
+  STORE_PATH: /pnpm/store
+
+jobs:
+  heavy_pnpm_install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: test-heavy
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: |
+            pnpm-store
+          key: cache-heavy-pnpm-${{ hashFiles('.github/workflows/test-heavy/package.json') }}
+
+      - name: inject cache into docker
+        uses: ./
+        with:
+          skip-extraction: ${{ steps.cache.outputs.cache-hit == 'true' }}
+          cache-map: |
+            {
+              "pnpm-store": {
+                "target": "/pnpm/store",
+                "id": "1"
+              }
+            }
+
+      - name: Heavy build (pnpm install with many big packages)
+        uses: docker/build-push-action@v6
+        with:
+          context: .github/workflows/test-heavy
+          #cache-from: type=gha
+          #cache-to: type=gha,mode=max
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

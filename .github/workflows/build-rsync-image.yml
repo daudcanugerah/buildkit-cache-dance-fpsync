@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: hiromaily/cache-dance-rsync
+  IMAGE_NAME: daudcanugerah/cache-dance-rsync
 
 jobs:
   build:

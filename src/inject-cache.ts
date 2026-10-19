@@ -67,7 +67,7 @@ async function injectCache(cacheSource: string, cacheOptions: CacheOptions, scra
 
     if (rsyncEnabled) {
         // rsync mode: Use rsync for differential sync (much faster on subsequent runs)
-        // Uses ghcr.io/hiromaily/cache-dance-rsync:latest which has rsync pre-installed
+        // Uses ghcr.io/daudcanugerah/cache-dance-rsync:latest which has rsync pre-installed
         // --ignore-existing: Skip files that already exist in destination (incremental)
         // -a: Archive mode (preserves permissions, timestamps, etc.)
         dancefileContent = `

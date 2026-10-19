@@ -70,7 +70,7 @@ jobs:
           key: cache-mount-${{ hashFiles('Dockerfile') }}
 
       - name: Restore Docker cache mounts
-        uses: hiromaily/buildkit-cache-dance@v4
+        uses: daudcanugerah/buildkit-cache-dance@v4
         with:
           builder: ${{ steps.setup-buildx.outputs.name }}
           cache-dir: cache-mount
@@ -141,7 +141,7 @@ The `cache-dir` parameter is a critical concept for using this action with `acti
     key: cache-${{ hashFiles('Dockerfile') }}
 
 - name: BuildKit Cache Dance
-  uses: hiromaily/buildkit-cache-dance@v4
+  uses: daudcanugerah/buildkit-cache-dance@v4
   with:
     cache-dir: cache-mount   # ← Must match the path above
 ```
@@ -164,7 +164,7 @@ If you require more fine grained control you can manually specify a JSON formatt
 
 ```yaml
       - name: Restore Docker cache mounts
-        uses: hiromaily/buildkit-cache-dance@v4
+        uses: daudcanugerah/buildkit-cache-dance@v4
         with:
           builder: ${{ steps.setup-buildx.outputs.name }}
           cache-map: |
@@ -179,7 +179,7 @@ Alternatively, you can provide a JSON object with additional options that should
 
 ```yaml
       - name: Restore Docker cache mounts
-        uses: hiromaily/buildkit-cache-dance@v4
+        uses: daudcanugerah/buildkit-cache-dance@v4
         with:
           builder: ${{ steps.setup-buildx.outputs.name }}
           cache-map: |
@@ -198,7 +198,7 @@ Alternatively, you can provide a JSON object with additional options that should
 In other CI systems, you can run the script directly via `node`:
 
 ```shell
-curl -LJO https://github.com/hiromaily/buildkit-cache-dance/archive/refs/tags/v4.0.0.tar.gz
+curl -LJO https://github.com/daudcanugerah/buildkit-cache-dance/archive/refs/tags/v4.0.0.tar.gz
 tar xvf buildkit-cache-dance-4.0.0.tar.gz
 ```
 
@@ -244,7 +244,7 @@ When cache is not working as expected, enable debug mode to get detailed logs:
 
 ```yaml
 - name: BuildKit Cache Dance (inject; extract in post)
-  uses: hiromaily/buildkit-cache-dance@v4
+  uses: daudcanugerah/buildkit-cache-dance@v4
   with:
     builder: ${{ steps.setup-buildx.outputs.name }}
     cache-dir: cache-mount
@@ -286,7 +286,7 @@ Use `skip-extraction: true` to skip the Post extract step (~60 seconds) when cac
 
 ```yaml
 - name: BuildKit Cache Dance (inject; extract in post)
-  uses: hiromaily/buildkit-cache-dance@v4
+  uses: daudcanugerah/buildkit-cache-dance@v4
   with:
     builder: ${{ steps.setup-buildx.outputs.name }}
     cache-dir: cache-mount
@@ -325,7 +325,7 @@ This release also makes it possible to run the script outside GitHub Actions in 
 
 ### v4 (this fork)
 
-This version is maintained in this fork (`hiromaily/buildkit-cache-dance`) and includes:
+This version is maintained in this fork (`daudcanugerah/buildkit-cache-dance`) and includes:
 
 - **Fix cache-dir being ignored with explicit cache-map**: When both `cache-dir` and `cache-map` were specified, `cache-dir` was not applied to cache paths, causing caches to be saved to the repository root instead of the specified directory
 - Critical bug fixes for multiple cache handling and path traversal issues
@@ -338,7 +338,7 @@ This version is maintained in this fork (`hiromaily/buildkit-cache-dance`) and i
 **Usage:**
 
 ```yaml
-uses: hiromaily/buildkit-cache-dance@v4
+uses: daudcanugerah/buildkit-cache-dance@v4
 ```
 
 ## Rsync Mode (Performance Optimization)
@@ -347,7 +347,7 @@ For large caches (like Go modules), the default `cp -R` full copy can take 1-4 m
 
 ```yaml
 - name: BuildKit Cache Dance
-  uses: hiromaily/buildkit-cache-dance@v4
+  uses: daudcanugerah/buildkit-cache-dance@v4
   with:
     cache-dir: cache-mount
     rsync-mode: true   # Enable differential sync
@@ -370,7 +370,7 @@ For large caches (like Go modules), the default `cp -R` full copy can take 1-4 m
 
 ### Utility image
 
-When `rsync-mode: true` is enabled, the action automatically uses `ghcr.io/hiromaily/cache-dance-rsync:latest` (Alpine 3.23 with rsync pre-installed) instead of the default busybox image. You can override this with a custom `utility-image` if needed.
+When `rsync-mode: true` is enabled, the action automatically uses `ghcr.io/daudcanugerah/cache-dance-rsync:latest` (Alpine 3.23 with rsync pre-installed) instead of the default busybox image. You can override this with a custom `utility-image` if needed.
 
 ## Development Notes
 

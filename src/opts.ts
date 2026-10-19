@@ -225,7 +225,7 @@ export function isRsyncMode(opts: Opts): boolean {
 
 // Default utility images
 export const DEFAULT_UTILITY_IMAGE = "ghcr.io/containerd/busybox:latest";
-export const RSYNC_UTILITY_IMAGE = "ghcr.io/hiromaily/cache-dance-rsync:latest";
+export const RSYNC_UTILITY_IMAGE = "ghcr.io/daudcanugerah/cache-dance-rsync:latest";
 
 /**
  * Get the appropriate utility image based on rsync-mode.
