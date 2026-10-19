@@ -36,7 +36,15 @@ jobs:
         with:
           path: |
             pnpm-store
-          key: cache-heavy-pnpm-${{ hashFiles('.github/workflows/test-heavy/package.json') }}
+          # Rolling key: a deterministic key (hash of package.json) causes an
+          # exact-key hit on every run, and actions/cache then SKIPS saving in
+          # the post step ("Cache hit occurred on the primary key, not saving
+          # cache") - so the freshly extracted store would never be saved.
+          # A unique per-run key always saves; restore-keys fetches the most
+          # recent entry on the next run.
+          key: cache-heavy-pnpm-${{ github.run_id }}
+          restore-keys: |
+            cache-heavy-pnpm-
 
       - name: inject cache into docker
         uses: ./
