@@ -14,6 +14,6 @@ ENV npm_config_store_dir=/pnpm/store
 COPY package.json pnpm-lock.yaml ./
 
 RUN --mount=type=cache,target=/pnpm/store,sharing=locked,id=pnpm-store \
-  pnpm install --frozen-lockfile --store-dir=/pnpm/store \
+  pnpm install --frozen-lockfile --ignore-scripts --store-dir=/pnpm/store \
   && test "$(du -sm /pnpm/store | cut -f1)" -gt 1000 \
   && echo "heavy pnpm install OK: store=$(du -sm /pnpm/store | cut -f1)MB, packages=$(ls node_modules/.pnpm | wc -l)"
