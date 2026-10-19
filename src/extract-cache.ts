@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import {CacheOptions, Opts, getCacheMap, getMountArgsString, getTargetPath, getBuilder, generateUniqueSuffix, isDebug, isRsyncMode, getUtilityImage, validateSafePath, sanitizeForDockerfile} from './opts.js';
-import { run, runPiped, debug, debugSection, debugInspectDirectory, debugSizeComparison } from './run.js';
+import { run, debug, debugSection, debugInspectDirectory, debugSizeComparison } from './run.js';
 
 function elapsedMs(start: number): number {
   return Math.round((Date.now() - start) / 10) / 100;
@@ -12,10 +12,8 @@ async function extractCache(cacheSource: string, cacheOptions: CacheOptions, scr
     validateSafePath(cacheSource, 'cache source');
     validateSafePath(scratchDir, 'scratch directory');
 
-    // Generate unique names for this cache to avoid conflicts with multiple caches
+    // Generate unique suffix for this cache to avoid conflicts with multiple caches
     const uniqueSuffix = generateUniqueSuffix(cacheSource);
-    const imageName = `dance:extract-${uniqueSuffix}`;
-    const containerName = `cache-container-${uniqueSuffix}`;
 
     debugSection(`EXTRACT CACHE: ${cacheSource}`);
     debug(`Cache source (destination): ${cacheSource}`);
@@ -24,12 +22,11 @@ async function extractCache(cacheSource: string, cacheOptions: CacheOptions, scr
     debug(`Container image: ${containerImage}`);
     debug(`Builder: ${builder}`);
     debug(`Unique suffix: ${uniqueSuffix}`);
-    debug(`Image name: ${imageName}`);
-    debug(`Container name: ${containerName}`);
     debug(`Rsync mode: ${rsyncEnabled}`);
 
-    // Clean Scratch Directory to avoid leftover data from previous iterations
-    await fs.rm(scratchDir, { recursive: true, force: true });
+    // Clean Scratch Directory to avoid leftover data from previous iterations.
+    // sudo: the local exporter of a previous run may have left root-owned files.
+    await run('sudo', ['rm', '-rf', scratchDir]);
     await fs.mkdir(scratchDir, { recursive: true });
 
     // Prepare Timestamp for Layer Cache Busting
@@ -47,14 +44,20 @@ async function extractCache(cacheSource: string, cacheOptions: CacheOptions, scr
     debug(`Target path: ${targetPath}`);
     debug(`Mount args (CRITICAL): ${mountArgs}`);
 
-    // Always use cp in Dockerfile to extract from BuildKit cache mount to /var/dance-cache
-    // rsync will be used later in docker run to sync to host cache-dir for differential updates
+    // Multi-stage Dancefile: copy cache contents to /out in a stage, then export
+    // only that directory from a scratch stage via --output type=local.
+    // This avoids --load + docker cp / docker run entirely: BuildKit writes the
+    // files directly to the local filesystem. cp -a preserves hardlinks (pnpm
+    // stores are hardlink-heavy) and symlinks.
     const dancefileContent = `
-FROM ${containerImage}
+FROM ${containerImage} AS dance-cache
 COPY buildstamp buildstamp
 RUN --mount=${mountArgs} \\
-    mkdir -p /var/dance-cache/ \\
-    && cp -p -R ${targetPath}/. /var/dance-cache/ || true
+    mkdir -p /out \\
+    && cp -a ${targetPath}/. /out/ || true
+
+FROM scratch
+COPY --from=dance-cache /out /
 `;
 
     await fs.writeFile(path.join(scratchDir, 'Dancefile.extract'), dancefileContent);
@@ -68,16 +71,26 @@ RUN --mount=${mountArgs} \\
         beforeSize = await debugInspectDirectory(cacheSource, `Cache source BEFORE extraction (${cacheSource})`);
     }
 
-    // Ensure cache source directory exists for rsync mode
+    // Output directory for the local exporter. Must not exist beforehand,
+    // otherwise the local exporter merges into it and stale files survive.
+    const outputDir = path.join(scratchDir, 'out');
+    const absoluteCacheSource = path.resolve(cacheSource);
+
+    // Ensure cache source directory exists
     await fs.mkdir(cacheSource, { recursive: true });
 
     try {
-        // Extract Data into Docker Image
-        debug(`Running docker buildx build for extraction...`);
+        // Extract Data directly to local filesystem via BuildKit local exporter
+        debug(`Running docker buildx build with --output type=local for extraction...`);
         debug(`TIP: For more detailed docker output, run with: BUILDKIT_PROGRESS=plain`);
 
         // Use --progress=plain in debug mode for detailed output
-        const buildArgs = ['buildx', 'build', '--builder', builder, '-f', path.join(scratchDir, 'Dancefile.extract'), '--tag', imageName, '--load'];
+        const buildArgs = [
+            'buildx', 'build',
+            '--builder', builder,
+            '-f', path.join(scratchDir, 'Dancefile.extract'),
+            '--output', `type=local,dest=${outputDir}`,
+        ];
         if (debugEnabled) {
             buildArgs.push('--progress=plain');
         }
@@ -86,72 +99,28 @@ RUN --mount=${mountArgs} \\
         await run('docker', buildArgs);
         debug(`Docker build completed successfully (exit code: 0)`);
 
+        if (debugEnabled) {
+            await debugInspectDirectory(outputDir, `Local export output dir`);
+        }
+
+        // The local exporter writes files as root (docker driver), so cleanup
+        // and moves into cacheSource must use sudo on the host.
         if (rsyncEnabled) {
-            // rsync mode: Use docker run to rsync directly to host cache-dir
-            // This allows differential sync because host cache-dir persists between runs
-            debug(`Using rsync mode: syncing directly to host cache-dir for differential updates`);
-
-            // Get absolute path for bind mount
-            const absoluteCacheSource = path.resolve(cacheSource);
-            debug(`Absolute cache source path: ${absoluteCacheSource}`);
-
-            // Remove existing container if exists
-            try {
-                await run('docker', ['rm', '-f', containerName]);
-            } catch (error) {
-                // Ignore error if container does not exist
-            }
-
-            // Run rsync inside container with host cache-dir bind-mounted
-            // rsync -a: archive mode (preserves permissions, timestamps, symlinks, etc.)
-            // rsync --delete: remove files in destination that don't exist in source
-            // This provides true differential sync - only changed files are written
-            // Note: Use 'sh -c' because the base image has ENTRYPOINT ["/bin/sh"]
-            debug(`Running docker run with rsync to sync to host cache-dir...`);
-            await run('docker', [
-                'run',
-                '--rm',
-                '-v', `${absoluteCacheSource}:/mnt/host-cache`,
-                imageName,
-                '-c', 'rsync -a --delete /var/dance-cache/ /mnt/host-cache/'
+            // rsync mode: differential sync from exported output to host cache-dir
+            // -a: archive (permissions, timestamps, symlinks, owner)
+            // -H: preserve hardlinks (pnpm stores are hardlink-heavy)
+            // --delete: remove files in destination that don't exist in source
+            debug(`Using rsync mode: syncing exported output to host cache-dir...`);
+            await run('sudo', [
+                'rsync', '-a', '-H', '--delete',
+                `${outputDir}/`, `${absoluteCacheSource}/`,
             ]);
             debug(`Rsync completed successfully`);
         } else {
-            // Default mode: Use docker cp to extract to scratch, then move to cache source
-            debug(`Using cp mode: extracting via docker cp`);
-
-            // Create Extraction Container
-            try {
-                await run('docker', ['rm', '-f', containerName]);
-            } catch (error) {
-                // Ignore error if container does not exist
-            }
-            debug(`Creating container: ${containerName}`);
-            await run('docker', ['create', '-ti', '--name', containerName, imageName]);
-
-            // Unpack Docker Image into Scratch
-            debug(`Extracting data from container to scratch dir...`);
-            await runPiped(
-                ['docker', ['cp', '-L', `${containerName}:/var/dance-cache`, '-']],
-                ['tar', ['-H', 'posix', '-x', '-C', scratchDir]]
-            );
-
-            // Inspect scratch dir after docker cp
-            if (debugEnabled) {
-                await debugInspectDirectory(path.join(scratchDir, 'dance-cache'), `Scratch dir after docker cp`);
-            }
-
-            // Move Cache into Its Place
-            debug(`Moving extracted cache to: ${cacheSource}`);
+            // Default mode: replace cache source with exported output
+            debug(`Using cp mode: moving exported output to cache source...`);
             await run('sudo', ['rm', '-rf', cacheSource]);
-            await fs.rename(path.join(scratchDir, 'dance-cache'), cacheSource);
-
-            // Cleanup container for cp mode
-            try {
-                await run('docker', ['rm', '-f', containerName]);
-            } catch (error) {
-                // Ignore cleanup errors
-            }
+            await run('sudo', ['mv', outputDir, cacheSource]);
         }
 
         // Inspect cache source after extraction and compare sizes
@@ -161,12 +130,9 @@ RUN --mount=${mountArgs} \\
             debugSizeComparison(beforeSize, afterSize, `Extract: ${cacheSource}`);
         }
     } finally {
-        // Cleanup: Remove the temporary image (always runs)
-        try {
-            await run('docker', ['rmi', '-f', imageName]);
-        } catch (error) {
-            // Ignore cleanup errors
-        }
+        // Cleanup: remove root-owned export output (always runs).
+        // cacheSource was already synced/moved, and the Dancefile stays for debugging.
+        await run('sudo', ['rm', '-rf', outputDir]);
     }
 
     debug(`Extract cache completed for: ${cacheSource}`);
