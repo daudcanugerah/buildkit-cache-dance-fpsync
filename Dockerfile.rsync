@@ -1,5 +1,11 @@
-# Minimal rsync image for buildkit-cache-dance
-# Used when rsync-mode is enabled for differential cache sync
-FROM alpine:3.23
-RUN apk add --no-cache rsync
+# Minimal rsync/fpsync image for buildkit-cache-dance
+# Used when rsync-mode is enabled for differential cache sync.
+# Debian (not Alpine) because fpart/fpsync is packaged in Debian but not Alpine.
+# fpsync = fpart-driven parallel rsync, much faster on large caches.
+FROM debian:bookworm-slim
+
+RUN apt-get update -qq \
+  && apt-get install -y -qq --no-install-recommends rsync fpart \
+  && rm -rf /var/lib/apt/lists/*
+
 ENTRYPOINT ["/bin/sh"]
