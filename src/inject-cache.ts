@@ -66,16 +66,21 @@ async function injectCache(cacheSource: string, cacheOptions: CacheOptions, scra
     let dancefileContent: string;
 
     if (rsyncEnabled) {
-        // rsync mode: Use rsync for differential sync (much faster on subsequent runs)
-        // Uses ghcr.io/daudcanugerah/cache-dance-rsync:latest which has rsync pre-installed
+        // rsync mode: Use parallel fpsync for differential sync (much faster on
+        // subsequent and cold runs) when fpsync is available (rsync utility image),
+        // falling back to single rsync otherwise.
         // --ignore-existing: Skip files that already exist in destination (incremental)
-        // -a: Archive mode (preserves permissions, timestamps, etc.)
+        // -H: preserve hardlinks across fpart chunks (pnpm stores are hardlink-heavy)
         dancefileContent = `
 FROM ${containerImage}
 COPY buildstamp buildstamp
 RUN --mount=${mountArgs} \\
     --mount=type=bind,source=.,target=/var/dance-cache \\
-    rsync -a --ignore-existing /var/dance-cache/ ${targetPath}/ ${ownershipCommand} || true
+    if command -v fpsync >/dev/null 2>&1; then \\
+        fpsync -n $(nproc) -o "--ignore-existing -H" -t /tmp/fpsync /var/dance-cache/ ${targetPath}/; \\
+    else \\
+        rsync -a --ignore-existing /var/dance-cache/ ${targetPath}/; \\
+    fi ${ownershipCommand} || true
 `;
     } else {
         // Default mode: Use cp for full copy
@@ -95,6 +100,7 @@ RUN --mount=${mountArgs} \\
 
     try {
         // Inject Data into Docker Cache
+        const buildStart = Date.now();
         debug(`Running docker buildx build for injection...`);
         debug(`TIP: For more detailed docker output, run with: BUILDKIT_PROGRESS=plain`);
 
@@ -106,8 +112,13 @@ RUN --mount=${mountArgs} \\
         buildArgs.push(cacheSource);
 
         await run('docker', buildArgs);
-        debug(`Docker build completed successfully (exit code: 0)`);
-    } finally {
+        const buildSecs = elapsedMs(buildStart);
+
+        // Report the timing breakdown. In debug mode the build log (printed
+        // above with --progress=plain) already shows the fpsync/rsync step
+        // duration; here we log the total for quick comparison.
+        console.log(`[cache-dance] inject '${cacheSource}' -> ${targetPath}: total ${buildSecs}s (fpsync/rsync copy duration in 'RUN' step above)`);
+        debug(`Inject docker build (incl. copy): ${buildSecs}s`);    } finally {
         // Cleanup: Remove the temporary image (always runs)
         try {
             await run('docker', ['rmi', '-f', imageName]);
@@ -149,5 +160,6 @@ export async function injectCaches(opts: Opts) {
         debugSection(`INJECT CACHES - TIMING`);
         debug(`Inject total: ${elapsedMs(injectStart)}s (use this to verify cache/rsync improvement)`);
     }
+    console.log(`[cache-dance] inject phase complete: total ${elapsedMs(injectStart)}s for ${Object.keys(cacheMap).length} cache(s)`);
     debugSection(`INJECT CACHES - COMPLETE`);
 }

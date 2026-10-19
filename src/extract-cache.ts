@@ -47,14 +47,19 @@ async function extractCache(cacheSource: string, cacheOptions: CacheOptions, scr
     // Multi-stage Dancefile: copy cache contents to /out in a stage, then export
     // only that directory from a scratch stage via --output type=local.
     // This avoids --load + docker cp / docker run entirely: BuildKit writes the
-    // files directly to the local filesystem. cp -a preserves hardlinks (pnpm
-    // stores are hardlink-heavy) and symlinks.
+    // files directly to the local filesystem.
+    // Copy uses fpsync (fpart-driven parallel rsync) when available, falling
+    // back to plain cp -a otherwise. cp -a preserves hardlinks and symlinks.
     const dancefileContent = `
 FROM ${containerImage} AS dance-cache
 COPY buildstamp buildstamp
 RUN --mount=${mountArgs} \\
     mkdir -p /out \\
-    && cp -a ${targetPath}/. /out/ || true
+    && if command -v fpsync >/dev/null 2>&1; then \\
+        fpsync -n $(nproc) -o "-H" -t /tmp/fpsync ${targetPath}/ /out/; \\
+    else \\
+        cp -a ${targetPath}/. /out/; \\
+    fi || true
 
 FROM scratch
 COPY --from=dance-cache /out /
@@ -75,12 +80,14 @@ COPY --from=dance-cache /out /
     // otherwise the local exporter merges into it and stale files survive.
     const outputDir = path.join(scratchDir, 'out');
     const absoluteCacheSource = path.resolve(cacheSource);
+    const extractStart = Date.now();
 
     // Ensure cache source directory exists
     await fs.mkdir(cacheSource, { recursive: true });
 
     try {
         // Extract Data directly to local filesystem via BuildKit local exporter
+        const buildStart = Date.now();
         debug(`Running docker buildx build with --output type=local for extraction...`);
         debug(`TIP: For more detailed docker output, run with: BUILDKIT_PROGRESS=plain`);
 
@@ -97,7 +104,11 @@ COPY --from=dance-cache /out /
         buildArgs.push(scratchDir);
 
         await run('docker', buildArgs);
-        debug(`Docker build completed successfully (exit code: 0)`);
+        const buildSecs = elapsedMs(buildStart);
+
+        // The build log (--progress=plain in debug mode) shows the fpsync/cp
+        // step duration; the exporter write time is the remainder.
+        console.log(`[cache-dance] extract build for '${cacheSource}': ${buildSecs}s (fpsync/cp step visible in 'RUN' line above; remainder = local exporter write)`);
 
         if (debugEnabled) {
             await debugInspectDirectory(outputDir, `Local export output dir`);
@@ -111,11 +122,12 @@ COPY --from=dance-cache /out /
             // -H: preserve hardlinks (pnpm stores are hardlink-heavy)
             // --delete: remove files in destination that don't exist in source
             debug(`Using rsync mode: syncing exported output to host cache-dir...`);
+            const rsyncStart = Date.now();
             await run('sudo', [
                 'rsync', '-a', '-H', '--delete',
                 `${outputDir}/`, `${absoluteCacheSource}/`,
             ]);
-            debug(`Rsync completed successfully`);
+            console.log(`[cache-dance] extract host rsync -> '${cacheSource}': ${elapsedMs(rsyncStart)}s`);
         } else {
             // Default mode: replace cache source with exported output
             debug(`Using cp mode: moving exported output to cache source...`);
@@ -128,6 +140,14 @@ COPY --from=dance-cache /out /
         if (debugEnabled) {
             afterSize = await debugInspectDirectory(cacheSource, `Cache source AFTER extraction (${cacheSource})`);
             debugSizeComparison(beforeSize, afterSize, `Extract: ${cacheSource}`);
+        }
+
+        // Always-print summary: total time and data size for this cache
+        const totalSecs = elapsedMs(extractStart);
+        if (debugEnabled && afterSize) {
+            console.log(`[cache-dance] extract '${cacheSource}' summary: total ${totalSecs}s, size ${afterSize}`);
+        } else {
+            console.log(`[cache-dance] extract '${cacheSource}' summary: total ${totalSecs}s`);
         }
     } finally {
         // Cleanup: remove root-owned export output (always runs).
@@ -171,5 +191,6 @@ export async function extractCaches(opts: Opts) {
         debugSection(`EXTRACT CACHES - TIMING`);
         debug(`Extract total: ${elapsedMs(extractStart)}s (use this to verify cache/rsync improvement)`);
     }
+    console.log(`[cache-dance] extract phase complete: total ${elapsedMs(extractStart)}s for ${Object.keys(cacheMap).length} cache(s)`);
     debugSection(`EXTRACT CACHES - COMPLETE`);
 }
