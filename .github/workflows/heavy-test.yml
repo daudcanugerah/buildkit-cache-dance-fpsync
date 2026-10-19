@@ -21,10 +21,42 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      # Reclaim ~25-30 GB pre-installed software we don't use, so BuildKit's
+      # auto-computed GC limits and the docker-container builder have more room
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
         id: buildx
+        with:
+          driver: docker-container
+          # Bigger GC budget for cache mounts: default auto-computed rule caps
+          # stale (>48h) exec.cachemount blobs at ~488 MiB; give it 8 GiB and
+          # raise the overall keep policy for the ~2.2GB pnpm store.
+          config-inline: |
+            [worker.oci]
+              gc = true
+              gckeepduration = "48h"
+              gckeepdiskusage = "30GB"
+
+            [[worker.oci.gcpolicy]]
+              keepBytes = 8589934592
+              keepDuration = 172800
+              filters = ["type==exec.cachemount"]
+
+            [[worker.oci.gcpolicy]]
+              keepBytes = 21474836480
+              all = true
+              keepDuration = 172800
 
       - uses: docker/metadata-action@v5
         id: meta
