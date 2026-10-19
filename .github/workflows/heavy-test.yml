@@ -1,9 +1,16 @@
 ---
 name: Heavy pnpm install Test
 on:
-  push:
   pull_request:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'dist/**'
+      - 'action.yml'
+      - '.github/workflows/heavy-test.yml'
+      - '.github/workflows/test-heavy/**'
 
 env:
   PNPM_HOME: /pnpm

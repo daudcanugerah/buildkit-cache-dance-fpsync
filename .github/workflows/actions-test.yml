@@ -1,8 +1,16 @@
 ---
 name: Actions Test
 on:
-  push:
   pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'dist/**'
+      - 'action.yml'
+      - '.github/workflows/actions-test.yml'
+      - '.github/workflows/test/**'
 jobs:
   actions_test:
     runs-on: ubuntu-22.04

@@ -3,6 +3,15 @@ name: Tests
 on:
   pull_request:
   push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'dist/**'
+      - 'tests/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/unit-tests.yml'
 
 permissions:
   contents: read
