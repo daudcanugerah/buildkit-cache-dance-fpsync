@@ -1,13 +1,25 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import {CacheOptions, Opts, getCacheMap, getMountArgsString, getTargetPath, getBuilder, generateUniqueSuffix, isDebug, isRsyncMode, getUtilityImage, validateSafePath, sanitizeForDockerfile} from './opts.js';
-import { run, debug, debugSection, debugInspectDirectory, debugSizeComparison } from './run.js';
+import {CacheOptions, Opts, getCacheMap, getMountArgsString, getTargetPath, getBuilder, generateUniqueSuffix, isDebug, getUtilityImage, validateSafePath, sanitizeForDockerfile} from './opts.js';
+import { run, runPiped, debug, debugSection, debugInspectDirectory, debugSizeComparison } from './run.js';
 
 function elapsedMs(start: number): number {
   return Math.round((Date.now() - start) / 10) / 100;
 }
 
-async function extractCache(cacheSource: string, cacheOptions: CacheOptions, scratchDir: string, containerImage: string, builder: string, debugEnabled: boolean, rsyncEnabled: boolean) {
+// Remove a directory tree. Falls back to sudo only when the plain removal
+// fails (e.g. legacy dirs from older versions that contain root-owned files
+// left by the former local-exporter flow).
+async function rmrf(dir: string, label: string) {
+    try {
+        await fs.rm(dir, { recursive: true, force: true });
+    } catch (err: any) {
+        debug(`${label}: plain rm failed (${err?.code ?? err}), retrying with sudo`);
+        await run('sudo', ['rm', '-rf', dir]);
+    }
+}
+
+async function extractCache(cacheSource: string, cacheOptions: CacheOptions, scratchDir: string, containerImage: string, builder: string, debugEnabled: boolean) {
     // Security: Validate cacheSource is a safe relative path
     validateSafePath(cacheSource, 'cache source');
     validateSafePath(scratchDir, 'scratch directory');
@@ -22,11 +34,9 @@ async function extractCache(cacheSource: string, cacheOptions: CacheOptions, scr
     debug(`Container image: ${containerImage}`);
     debug(`Builder: ${builder}`);
     debug(`Unique suffix: ${uniqueSuffix}`);
-    debug(`Rsync mode: ${rsyncEnabled}`);
 
     // Clean Scratch Directory to avoid leftover data from previous iterations.
-    // sudo: the local exporter of a previous run may have left root-owned files.
-    await run('sudo', ['rm', '-rf', scratchDir]);
+    await rmrf(scratchDir, 'scratch cleanup');
     await fs.mkdir(scratchDir, { recursive: true });
 
     // Prepare Timestamp for Layer Cache Busting
@@ -44,19 +54,24 @@ async function extractCache(cacheSource: string, cacheOptions: CacheOptions, scr
     debug(`Target path: ${targetPath}`);
     debug(`Mount args (CRITICAL): ${mountArgs}`);
 
-    // Multi-stage Dancefile: copy cache contents to /out in a stage, then export
-    // only that directory from a scratch stage via --output type=local.
-    // This avoids --load + docker cp / docker run entirely: BuildKit writes the
-    // files directly to the local filesystem.
+    // Tar-stream Dancefile: copy cache contents to /out in a stage, then export
+    // that directory as a tar stream piped into host-side tar. This avoids both
+    // docker cp / docker run and the local exporter: tar as the invoking user
+    // strips root ownership (--no-same-owner), so nothing root-owned is ever
+    // written and no sudo is needed on the host.
     // Copy uses fpsync (fpart-driven parallel rsync) when available, falling
     // back to plain cp -a otherwise. cp -a preserves hardlinks and symlinks.
+    // -s 500: partition by ~500 MiB of file size so trees with few large files
+    //         (apt .deb archives) still split across parallel jobs
+    // -f 2000: fpsync's default max files per partition (explicit here so
+    //          many-small-file trees like Go/pnpm caches split predictably)
     const dancefileContent = `
 FROM ${containerImage} AS dance-cache
 COPY buildstamp buildstamp
 RUN --mount=${mountArgs} \\
     mkdir -p /out \\
     && if command -v fpsync >/dev/null 2>&1; then \\
-        fpsync -n $(nproc) -o "-H" -t /tmp/fpsync ${targetPath}/ /out/; \\
+        fpsync -n $((2 * $(nproc))) -o "-H" -s 500 -f 2000 -t /tmp/fpsync ${targetPath}/ /out/; \\
     else \\
         cp -a ${targetPath}/. /out/; \\
     fi || true
@@ -76,64 +91,54 @@ COPY --from=dance-cache /out /
         beforeSize = await debugInspectDirectory(cacheSource, `Cache source BEFORE extraction (${cacheSource})`);
     }
 
-    // Output directory for the local exporter. Must not exist beforehand,
-    // otherwise the local exporter merges into it and stale files survive.
+    // Extraction target. Must not exist beforehand, otherwise tar merges into
+    // it and stale files survive.
     const outputDir = path.join(scratchDir, 'out');
-    const absoluteCacheSource = path.resolve(cacheSource);
     const extractStart = Date.now();
 
     // Ensure cache source directory exists
     await fs.mkdir(cacheSource, { recursive: true });
 
     try {
-        // Extract Data directly to local filesystem via BuildKit local exporter
+        // Extract via tar stream: BuildKit exports the scratch stage as a tar
+        // on stdout, which host-side tar extracts as the runner user.
+        // --no-same-owner: never try to restore root ownership (would fail or
+        // require sudo); files are owned by the invoking user instead.
         const buildStart = Date.now();
-        debug(`Running docker buildx build with --output type=local for extraction...`);
+        debug(`Running docker buildx build with --output type=tar, piped to host tar...`);
         debug(`TIP: For more detailed docker output, run with: BUILDKIT_PROGRESS=plain`);
 
-        // Use --progress=plain in debug mode for detailed output
         const buildArgs = [
             'buildx', 'build',
             '--builder', builder,
             '-f', path.join(scratchDir, 'Dancefile.extract'),
-            '--output', `type=local,dest=${outputDir}`,
+            '--output', 'type=tar',
         ];
         if (debugEnabled) {
             buildArgs.push('--progress=plain');
         }
         buildArgs.push(scratchDir);
 
-        await run('docker', buildArgs);
+        await rmrf(outputDir, 'output cleanup');
+        await fs.mkdir(outputDir, { recursive: true });
+        await runPiped(['docker', buildArgs], ['tar', ['-x', '-C', outputDir, '--no-same-owner']]);
         const buildSecs = elapsedMs(buildStart);
 
         // The build log (--progress=plain in debug mode) shows the fpsync/cp
-        // step duration; the exporter write time is the remainder.
-        console.log(`[cache-dance] extract build for '${cacheSource}': ${buildSecs}s (fpsync/cp step visible in 'RUN' line above; remainder = local exporter write)`);
+        // step duration; the tar extraction time is the remainder.
+        console.log(`[cache-dance] extract build for '${cacheSource}': ${buildSecs}s (fpsync/cp step visible in 'RUN' line above; remainder = tar stream + extraction)`);
 
         if (debugEnabled) {
-            await debugInspectDirectory(outputDir, `Local export output dir`);
+            await debugInspectDirectory(outputDir, `Tar extraction output dir`);
         }
 
-        // The local exporter writes files as root (docker driver), so cleanup
-        // and moves into cacheSource must use sudo on the host.
-        if (rsyncEnabled) {
-            // rsync mode: differential sync from exported output to host cache-dir
-            // -a: archive (permissions, timestamps, symlinks, owner)
-            // -H: preserve hardlinks (pnpm stores are hardlink-heavy)
-            // --delete: remove files in destination that don't exist in source
-            debug(`Using rsync mode: syncing exported output to host cache-dir...`);
-            const rsyncStart = Date.now();
-            await run('sudo', [
-                'rsync', '-a', '-H', '--delete',
-                `${outputDir}/`, `${absoluteCacheSource}/`,
-            ]);
-            console.log(`[cache-dance] extract host rsync -> '${cacheSource}': ${elapsedMs(rsyncStart)}s`);
-        } else {
-            // Default mode: replace cache source with exported output
-            debug(`Using cp mode: moving exported output to cache source...`);
-            await run('sudo', ['rm', '-rf', cacheSource]);
-            await run('sudo', ['mv', outputDir, cacheSource]);
-        }
+        // The extraction is a complete snapshot, so replacing the cache source
+        // is a same-filesystem rename - instant even for multi-GB caches, and
+        // it inherently drops stale files. No sudo needed: all files are owned
+        // by the runner user.
+        debug(`Replacing cache source with extracted snapshot...`);
+        await rmrf(cacheSource, 'cache source cleanup');
+        await fs.rename(outputDir, cacheSource);
 
         // Inspect cache source after extraction and compare sizes
         let afterSize: string | null = null;
@@ -150,9 +155,10 @@ COPY --from=dance-cache /out /
             console.log(`[cache-dance] extract '${cacheSource}' summary: total ${totalSecs}s`);
         }
     } finally {
-        // Cleanup: remove root-owned export output (always runs).
-        // cacheSource was already synced/moved, and the Dancefile stays for debugging.
-        await run('sudo', ['rm', '-rf', outputDir]);
+        // Cleanup of the extraction output (always runs). No sudo needed since
+        // tar extracted as the runner user.
+        // cacheSource was already replaced, and the Dancefile stays for debugging.
+        await rmrf(outputDir, 'output cleanup');
     }
 
     debug(`Extract cache completed for: ${cacheSource}`);
@@ -160,11 +166,9 @@ COPY --from=dance-cache /out /
 
 export async function extractCaches(opts: Opts) {
     const debugEnabled = isDebug(opts);
-    const rsyncEnabled = isRsyncMode(opts);
 
     debugSection(`EXTRACT CACHES - POST JOB CLEANUP`);
     debug(`skip-extraction: ${opts["skip-extraction"]}`);
-    debug(`Rsync mode: ${rsyncEnabled}`);
 
     if (opts["skip-extraction"]) {
         console.log("skip-extraction is set. Skipping extraction step...");
@@ -180,16 +184,15 @@ export async function extractCaches(opts: Opts) {
     debugSection(`EXTRACT CACHES - START`);
     debug(`Total caches to extract: ${Object.keys(cacheMap).length}`);
     debug(`Cache map: ${JSON.stringify(cacheMap, null, 2)}`);
-    debug(`Rsync mode: ${rsyncEnabled}`);
 
     // Extract Caches for each source-target pair
     for (const [cacheSource, cacheOptions] of Object.entries(cacheMap)) {
-        await extractCache(cacheSource, cacheOptions, scratchDir, containerImage, builder, debugEnabled, rsyncEnabled);
+        await extractCache(cacheSource, cacheOptions, scratchDir, containerImage, builder, debugEnabled);
     }
 
     if (debugEnabled) {
         debugSection(`EXTRACT CACHES - TIMING`);
-        debug(`Extract total: ${elapsedMs(extractStart)}s (use this to verify cache/rsync improvement)`);
+        debug(`Extract total: ${elapsedMs(extractStart)}s (use this to verify cache improvement)`);
     }
     console.log(`[cache-dance] extract phase complete: total ${elapsedMs(extractStart)}s for ${Object.keys(cacheMap).length} cache(s)`);
     debugSection(`EXTRACT CACHES - COMPLETE`);

@@ -34,6 +34,15 @@ async function injectCache(cacheSource: string, cacheOptions: CacheOptions, scra
     // Prepare Cache Source Directory
     await fs.mkdir(cacheSource, { recursive: true });
 
+    // Skip the dance build entirely when there is nothing to inject (first
+    // run, or after cache eviction): copying an empty dir still pays for a
+    // full buildx build plus image tag/cleanup.
+    const cacheEntries = await fs.readdir(cacheSource);
+    if (cacheEntries.length === 0) {
+        console.log(`[cache-dance] inject '${cacheSource}': cache source is empty, skipping injection build`);
+        return;
+    }
+
     // Inspect cache source before injection
     if (debugEnabled) {
         await debugInspectDirectory(cacheSource, `Cache source BEFORE injection (${cacheSource})`);
@@ -71,13 +80,17 @@ async function injectCache(cacheSource: string, cacheOptions: CacheOptions, scra
         // falling back to single rsync otherwise.
         // --ignore-existing: Skip files that already exist in destination (incremental)
         // -H: preserve hardlinks across fpart chunks (pnpm stores are hardlink-heavy)
+        // -s 500: partition by ~500 MiB of file size so trees with few large
+        //         files (apt .deb archives) still split across parallel jobs
+        // -f 2000: fpsync's default max files per partition (explicit here so
+        //          many-small-file trees like Go/pnpm caches split predictably)
         dancefileContent = `
 FROM ${containerImage}
 COPY buildstamp buildstamp
 RUN --mount=${mountArgs} \\
     --mount=type=bind,source=.,target=/var/dance-cache \\
     if command -v fpsync >/dev/null 2>&1; then \\
-        fpsync -n $(nproc) -o "--ignore-existing -H" -t /tmp/fpsync /var/dance-cache/ ${targetPath}/; \\
+        fpsync -n $((2 * $(nproc))) -o "--ignore-existing -H" -s 500 -f 2000 -t /tmp/fpsync /var/dance-cache/ ${targetPath}/; \\
     else \\
         rsync -a --ignore-existing /var/dance-cache/ ${targetPath}/; \\
     fi ${ownershipCommand} || true
