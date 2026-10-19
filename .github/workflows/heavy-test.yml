@@ -46,7 +46,7 @@ jobs:
             {
               "pnpm-store": {
                 "target": "/pnpm/store",
-                "id": "1"
+                "id": "pnpm-store"
               }
             }
 
