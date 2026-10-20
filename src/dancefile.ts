@@ -92,12 +92,12 @@ function fpsyncInjectStep(targetPath: TargetPath): string {
         fpsync -n $((2 * $(nproc))) -o "--ignore-existing -H" -s 500 -f 2000 -t /tmp/fpsync /var/dance-cache/ ${targetPath}/; \\
     else \\
         rsync -a --ignore-existing /var/dance-cache/ ${targetPath}/; \\
-    fi`;
+    fi && [ -n "$(ls -A ${targetPath} 2>/dev/null)" ] && echo "[cache-dance] inject stage: target populated" || echo "[cache-dance] WARNING inject stage: target EMPTY (copy failed)"`;
 }
 
 function cpInjectStep(targetPath: TargetPath): string {
     return `mkdir -p ${targetPath} \\
-    && cp -p -R /var/dance-cache/. ${targetPath}`;
+    && cp -p -R /var/dance-cache/. ${targetPath} && [ -n "$(ls -A ${targetPath} 2>/dev/null)" ] && echo "[cache-dance] inject stage: target populated" || echo "[cache-dance] WARNING inject stage: target EMPTY (copy failed)"`;
 }
 
 /**
@@ -136,11 +136,11 @@ function fpsyncExtractStep(targetPath: TargetPath): string {
         fpsync -n $((2 * $(nproc))) -o "-H" -s 500 -f 2000 -t /tmp/fpsync ${targetPath}/ /out/; \\
     else \\
         cp -a ${targetPath}/. /out/; \\
-    fi`;
+    fi && [ -n "$(ls -A /out 2>/dev/null)" ] && echo "[cache-dance] extract stage: /out populated" || echo "[cache-dance] WARNING extract stage: /out is EMPTY (cache mount empty or copy failed)"`;
 }
 
 function cpExtractStep(targetPath: TargetPath): string {
-    return `cp -a ${targetPath}/. /out/`;
+    return `cp -a ${targetPath}/. /out/ && [ -n "$(ls -A /out 2>/dev/null)" ] && echo "[cache-dance] extract stage: /out populated" || echo "[cache-dance] WARNING extract stage: /out is EMPTY (cache mount empty or copy failed)"`;
 }
 
 /**

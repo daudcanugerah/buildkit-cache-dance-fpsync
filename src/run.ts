@@ -31,9 +31,11 @@ export async function run(command: string, args: string[], options?: { captureOu
         debug(`Executing: ${cmdString}`);
     }
     try {
+        // spawn-please resolves { stdout, stderr }
         const output = await spawnPlease(command, args);
         if (debugMode && options?.captureOutput && output) {
-            debug(`Output: ${output.toString().substring(0, 500)}${output.toString().length > 500 ? '...(truncated)' : ''}`);
+            const text = output.stdout?.toString() ?? '';
+            debug(`Output: ${text.substring(0, 500)}${text.length > 500 ? '...(truncated)' : ''}`);
         }
         return output;
     } catch (error) {
@@ -76,7 +78,7 @@ export async function debugInspectDirectory(dirPath: string, label: string): Pro
         // Get directory size using du -sh
         try {
             const duOutput = await spawnPlease('du', ['-sh', dirPath]);
-            sizeStr = duOutput.toString().trim();
+            sizeStr = duOutput.stdout.trim();
             debug(`Size: ${sizeStr}`);
         } catch {
             debug(`Size: (unable to determine)`);
@@ -100,7 +102,7 @@ export async function debugInspectDirectory(dirPath: string, label: string): Pro
         // Find files recursively (limited)
         try {
             const findOutput = await spawnPlease('find', [dirPath, '-maxdepth', '3', '-type', 'f']);
-            const fileList = findOutput.toString().trim().split('\n').filter(f => f);
+            const fileList = findOutput.stdout.trim().split('\n').filter(f => f);
             debug(`Files (recursive, max depth 3): ${fileList.length} files found`);
             for (const f of fileList.slice(0, 10)) {
                 debug(`  ${f}`);
