@@ -23,6 +23,8 @@ This fork includes critical bug fixes not present in the upstream repository:
 - **Add scratchDir cleanup**: Prevents leftover data from previous iterations
 - **Improve cleanup reliability**: Moves Docker cleanup to `finally` blocks
 - **Add debug mode**: `is-debug: true` enables verbose logging for troubleshooting cache issues
+- **Single parallel build**: all caches are injected/extracted by one `docker buildx build` with one stage per cache (BuildKit runs them in parallel) instead of one sequential build per cache
+- **fpsync support**: differential sync uses `fpsync` (fpart-driven parallel rsync) in both inject and extract, with rsync/cp fallbacks
 
 ## Examples
 
@@ -234,9 +236,19 @@ Options:
   --skip-extraction  Skip cache extraction (use when cache-hit). Default: 'false'
   --builder          Name of the buildx builder. Default: 'default'
   --is-debug         Enable verbose debug logs. Default: 'false'
-  --rsync-mode       Use rsync for differential sync (faster for large caches). Default: 'true'
-  --help             Show this help
+   --rsync-mode       Use rsync for differential sync (faster for large caches). Default: 'true'
+   --help             Show this help
 ```
+
+### One build, all caches
+
+All caches are handled by a **single `docker buildx build` per phase** instead of one build per cache:
+
+- **Inject**: the generated `Dancefile.inject` contains one build stage per cache (each writing into its own `RUN --mount=type=cache`), and BuildKit runs these stages **in parallel**. Each cache source is passed as a [named build context](https://docs.docker.com/build/building/context/#named-contexts) (`--build-context`), so the build context stays small.
+- **Extract**: the generated `Dancefile.extract` copies every cache mount into one merged tree and exports it as a single tar stream, which host-side `tar` unpacks; each snapshot is then swapped into place with an atomic rename.
+
+Requirements: Dockerfile syntax ≥ 1.4 and buildx ≥ 0.8 (used by `docker/setup-buildx-action@v3` and any recent Docker). Caches that share the same cache id (`sharing=locked`) still serialize inside BuildKit; caches with distinct ids run fully in parallel.
+
 
 ## Debugging
 
@@ -356,10 +368,12 @@ For large caches (like Go modules), the default `cp -R` full copy can take 1-4 m
 
 ### How it works
 
-| Mode | Command | Performance |
+Each phase (inject / extract) runs a **single `docker buildx build`** whose generated Dockerfile contains one stage per cache; BuildKit executes these stages in parallel.
+
+| Mode | Command (per stage) | Performance |
 |------|---------|-------------|
 | Default (`rsync-mode: false`) | `cp -p -R` | Full copy every time |
-| Rsync (`rsync-mode: true`) | `rsync -a --ignore-existing` | Only copies new/changed files |
+| Rsync (`rsync-mode: true`) | `fpsync` (parallel rsync, falls back to `rsync -a --ignore-existing`) | Only copies new/changed files, parallel chunks |
 
 ### Performance comparison
 
