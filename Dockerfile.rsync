@@ -5,7 +5,13 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update -qq \
-  && apt-get install -y -qq --no-install-recommends rsync fpart \
+  && apt-get install -y -qq --no-install-recommends rsync fpart bash \
   && rm -rf /var/lib/apt/lists/*
+
+# fpsync is a /bin/sh script that calls 'set -m' for job-control isolation;
+# under dash (Debian default) that warns "can't access tty; job control
+# turned off" on every run and silently disables the isolation. Point /bin/sh
+# at bash so fpsync behaves as intended and runs quietly.
+RUN ln -sf bash /bin/sh
 
 ENTRYPOINT ["/bin/sh"]
